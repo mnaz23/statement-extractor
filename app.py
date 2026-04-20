@@ -4,86 +4,106 @@ import pandas as pd
 import json
 import io
 
-# --- 1. PAGE CONFIG ---
+# --- 1. SETUP ---
 st.set_page_config(page_title="AI Statement Extractor", layout="wide")
-st.title("📄 AI Statement Extractor (Ultra-Compatible Version)")
+st.title("📄 Smart AI Statement Extractor")
 
 # --- 2. SIDEBAR ---
 with st.sidebar:
-    st.header("Setup")
-    api_key = st.text_input("Enter Google Gemini API Key", type="password")
-    
-    if st.button("🔍 Run Connection Diagnostic"):
-        if api_key:
-            try:
-                genai.configure(api_key=api_key)
-                models = [m.name for m in genai.list_models()]
-                st.success("Connection Successful!")
-                st.write("Models available to your key:")
-                st.code("\n".join(models))
-            except Exception as e:
-                st.error(f"Diagnostic Failed: {e}")
-        else:
-            st.warning("Enter a key first.")
+    st.header("Authentication")
+    api_key = st.text_input("Enter Gemini API Key", type="password")
+    st.info("The app will automatically find the best model for your key.")
 
 # --- 3. UPLOADER ---
 uploaded_file = st.file_uploader("Upload Statement (PDF or Image)", type=['pdf', 'png', 'jpg', 'jpeg'])
 
-# --- 4. EXTRACTION LOGIC ---
+# --- 4. THE AUTO-MODEL FINDER ---
+def get_best_model():
+    """Automatically finds an available Flash model for this API key."""
+    try:
+        available_models = genai.list_models()
+        # Look for a model that supports 'generateContent' and has 'flash' in the name
+        for m in available_models:
+            if 'generateContent' in m.supported_generation_methods:
+                if 'gemini-1.5-flash' in m.name:
+                    return m.name
+        # Fallback to any model that supports generateContent if flash isn't found
+        for m in available_models:
+            if 'generateContent' in m.supported_generation_methods:
+                return m.name
+    except Exception as e:
+        st.error(f"Could not list models: {e}")
+    return None
+
+# --- 5. MAIN LOGIC ---
 if uploaded_file and api_key:
-    if st.button("🚀 Extract Data"):
-        with st.spinner("AI is processing..."):
+    if st.button("🚀 Process Document"):
+        with st.spinner("AI is analyzing..."):
             try:
+                # Configure AI
                 genai.configure(api_key=api_key)
                 
-                # --- TRY DIFFERENT MODEL NAMES ---
-                # Some API keys only work with 'gemini-1.5-flash-latest' 
-                # or just 'gemini-1.5-flash'. We try both.
-                success = False
-                model_to_use = None
+                # Automatically find the correct model ID (Fixes 404 error)
+                model_id = get_best_model()
                 
-                for model_name in ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'models/gemini-1.5-flash']:
-                    try:
-                        test_model = genai.GenerativeModel(model_name)
-                        # Quick check to see if model exists
-                        model_to_use = test_model
-                        success = True
-                        break
-                    except:
-                        continue
-                
-                if not success:
-                    st.error("Could not find a compatible Gemini model. Please run the Diagnostic in the sidebar.")
+                if not model_id:
+                    st.error("No compatible models found for this API Key.")
                     st.stop()
+                
+                st.toast(f"Using model: {model_id}")
+                model = genai.GenerativeModel(model_id)
 
-                # --- PREPARE DATA ---
+                # Prepare file and prompt
                 file_bytes = uploaded_file.getvalue()
-                prompt = "Extract the vendor name, date, total debits, total credits, final balance, and a list of all transactions into a JSON format. Return only JSON."
+                prompt = """
+                Extract the following into a JSON format:
+                - Vendor Name
+                - Statement Date
+                - Total Debits
+                - Total Credits
+                - Final Balance
+                - List of individual transactions with: Date, Description, Debit, Credit, Balance.
+                Return ONLY the JSON.
+                """
 
-                # --- EXECUTE ---
-                response = model_to_use.generate_content([
-                    prompt, 
-                    {"mime_type": uploaded_file.type, "data": file_bytes}
+                # Send request
+                response = model.generate_content([
+                    {"mime_type": uploaded_file.type, "data": file_bytes},
+                    prompt
                 ])
 
-                # Clean and Parse
-                res_text = response.text.replace('```json', '').replace('```', '').strip()
-                data = json.loads(res_text)
+                # Clean JSON response
+                raw_text = response.text.replace('```json', '').replace('```', '').strip()
+                data = json.loads(raw_text)
 
                 # Display Results
-                st.success(f"Extracted: {data.get('Vendor Name', 'Unknown')}")
-                df = pd.DataFrame(data.get('transactions', []))
-                st.dataframe(df)
+                st.success(f"Extraction Successful for {data.get('Vendor Name')}")
+                
+                # Show summary
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Debits", data.get("Total Debits"))
+                c2.metric("Credits", data.get("Total Credits"))
+                c3.metric("Final Balance", data.get("Final Balance"))
 
-                # Excel Download
+                # Show table
+                df = pd.DataFrame(data.get('transactions', []))
+                st.dataframe(df, use_container_width=True)
+
+                # Export
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df.to_excel(writer, index=False)
                 
-                st.download_button("📥 Download Excel", output.getvalue(), "extract.xlsx")
+                st.download_button(
+                    label="📥 Download Excel",
+                    data=output.getvalue(),
+                    file_name=f"Extract_{data.get('Vendor Name')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
             except Exception as e:
-                st.error("The Extraction Failed.")
-                with st.expander("Click here to see the technical error message"):
-                    st.code(str(e))
-                st.info("Check if your API Key is from 'Google AI Studio'. If you created it in 'Google Cloud Console', you must enable the 'Generative Language API' in your project settings.")
+                st.error("Processing Error")
+                st.expander("Details").write(str(e))
+else:
+    if not api_key:
+        st.warning("Please enter your API Key in the sidebar.")
